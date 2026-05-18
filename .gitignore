@@ -1,0 +1,26 @@
+# Local SQLite index and write-ahead-log sidecars.
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Source archives often contain personal data; commit explicitly with -f if needed.
+*.mbox
+*.pdf
+
+# Compiled binaries from `go build`.
+/emails-rag
+/ask
+/index
+/cmd/ask/ask
+/cmd/index/index
+
+# macOS metadata.
+.DS_Store
+
+# Editor scratch.
+.idea/
+.vscode/
+*.swp
+*.swo
