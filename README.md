@@ -57,6 +57,8 @@ Everything is local: embeddings, vector store, LLM. There is no telephoning home
 
 These are one-time steps. Skip any tool you already have.
 
+> **Shortcut:** after cloning, with Homebrew already installed and the Ollama app running, `make setup` runs steps 3 and 5 (brew deps + model pulls) in one go. The manual steps below explain what it's doing and how to troubleshoot.
+
 ### 1. Install Homebrew (if you don't have it)
 
 ```bash
