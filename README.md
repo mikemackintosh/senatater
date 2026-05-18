@@ -9,18 +9,19 @@ This README is meant to double as a personal runbook: every command you need to 
 ## Table of contents
 
 1. [What this is](#what-this-is)
-2. [Requirements](#requirements)
-3. [First-time installation](#first-time-installation)
-4. [First run (smoke test)](#first-run-smoke-test)
-5. [Daily usage](#daily-usage)
-6. [Command reference](#command-reference)
-7. [How it works](#how-it-works)
-8. [Operational notes](#operational-notes)
-9. [Testing](#testing)
-10. [Troubleshooting](#troubleshooting)
-11. [Pushing to GitHub](#pushing-to-github)
-12. [Extending](#extending)
-13. [Project layout](#project-layout)
+2. [Quick start with Make](#quick-start-with-make)
+3. [Requirements](#requirements)
+4. [First-time installation](#first-time-installation)
+5. [First run (smoke test)](#first-run-smoke-test)
+6. [Daily usage](#daily-usage)
+7. [Command reference](#command-reference)
+8. [How it works](#how-it-works)
+9. [Operational notes](#operational-notes)
+10. [Testing](#testing)
+11. [Troubleshooting](#troubleshooting)
+12. [Pushing to GitHub](#pushing-to-github)
+13. [Extending](#extending)
+14. [Project layout](#project-layout)
 
 ---
 
@@ -32,6 +33,47 @@ Two small Go CLIs:
 - **`cmd/ask`** is an interactive REPL. You type a question, it embeds the question, searches the SQLite index by cosine similarity, takes the top-k chunks, and asks a local Ollama chat model to answer using only that retrieved context. The answer streams to the terminal; sources with similarity scores are listed after.
 
 Everything is local: embeddings, vector store, LLM. There is no telephoning home. The SQLite file *is* the index — copy it, back it up, delete it like any other file.
+
+---
+
+## Quick start with Make
+
+If you have Homebrew installed and the Ollama desktop app running, this is the entire bootstrap:
+
+```bash
+git clone git@github.com:<your-user>/emails-rag.git
+cd emails-rag
+make setup           # brew install poppler ocrmypdf + ollama pull both models
+go run ./cmd/index -pdf-dir ~/Documents/contracts
+make ask
+```
+
+All Make targets:
+
+| Target | What it does |
+|---|---|
+| `make setup` | `deps` + `models` — full one-time bootstrap |
+| `make deps` | `brew install poppler ocrmypdf` (+ `ollama` if not already on `PATH`) |
+| `make models` | `ollama pull` both the embedder and chat model |
+| `make build` | `go build ./...` |
+| `make test` | `go test ./...` |
+| `make vet` | `go vet ./...` |
+| `make ask` | Run the interactive REPL (pre-checks that Ollama is reachable) |
+| `make clean` | Remove compiled binaries |
+| `make reset` | Delete `data/` after a `[y/N]` prompt |
+| `make help` | Print the same list inline |
+
+Any of these env-style variables can be overridden inline:
+
+```bash
+make ask CHAT_MODEL=qwen3:14b
+make models EMBED_MODEL=bge-m3
+make ask DB=other.db OLLAMA_URL=http://localhost:11435
+```
+
+Indexing is not Make-wrapped because flag combinations vary per run — use `go run ./cmd/index ...` with whichever `-pdf-dir`/`-mbox` flags you need.
+
+The rest of this README explains each piece in detail and is the place to look when something doesn't work.
 
 ---
 
@@ -55,9 +97,7 @@ Everything is local: embeddings, vector store, LLM. There is no telephoning home
 
 ## First-time installation
 
-These are one-time steps. Skip any tool you already have.
-
-> **Shortcut:** after cloning, with Homebrew already installed and the Ollama app running, `make setup` runs steps 3 and 5 (brew deps + model pulls) in one go. The manual steps below explain what it's doing and how to troubleshoot.
+These are one-time steps. Skip any tool you already have. If you just want the fast path, jump to [Quick start with Make](#quick-start-with-make); the section below explains what each Make target is actually doing.
 
 ### 1. Install Homebrew (if you don't have it)
 
@@ -85,6 +125,8 @@ If you need a newer Go than Homebrew ships, download from <https://go.dev/dl/> a
 ```bash
 brew install poppler ocrmypdf
 ```
+
+Or, equivalently, `make deps` (which also installs `ollama` if it isn't already on `PATH`).
 
 Verify both are on `PATH`:
 
@@ -130,11 +172,16 @@ ollama pull qwen3:30b-a3b
 ollama pull nomic-embed-text
 ```
 
+Or, equivalently, `make models` — pulls whichever models `EMBED_MODEL` and `CHAT_MODEL` point at (defaults above).
+
 Smaller / faster alternatives, useful when RAM or bandwidth is tight:
 
 ```bash
 ollama pull qwen3:14b          # ~9 GB chat model
 ollama pull bge-m3             # ~1.2 GB multilingual embedder, longer context
+
+# Or via make:
+make models CHAT_MODEL=qwen3:14b EMBED_MODEL=bge-m3
 ```
 
 Verify the pulls:
@@ -158,6 +205,7 @@ go mod tidy
 ```bash
 go build ./...
 go test ./...
+# Or: make build test
 ```
 
 You should see `ok` for each `internal/...` package. If anything fails, fix that before indexing.
@@ -248,7 +296,10 @@ To actually re-ingest a source you've changed, you need to either remove its row
 
 ```bash
 go run ./cmd/ask
+# Or: make ask
 ```
+
+`make ask` adds a pre-flight check that Ollama is reachable and forwards `DB`, `EMBED_MODEL`, `CHAT_MODEL` as flags. Override them inline, e.g. `make ask CHAT_MODEL=qwen3:14b`.
 
 The REPL prints:
 
@@ -398,6 +449,7 @@ If you want to start over from scratch:
 
 ```bash
 rm -rf data/
+# Or: make reset    (prompts before deleting)
 ```
 
 The next `cmd/index` run will recreate the directory, the database, and the schema. There is no destructive `migrate down` — deletion is the way.
@@ -440,6 +492,7 @@ git add -f testdata/sample.pdf
 
 ```bash
 go test ./...
+# Or: make test
 ```
 
 Covers chunking boundaries, vector encode/decode, cosine math, source-filter parsing, MIME extraction (plain, multipart/alternative, HTML fallback, quoted-printable, base64, RFC 2047 headers, attachment skipping), and mbox file splitting. No Ollama required for tests — they're all pure-logic unit tests.
@@ -455,6 +508,7 @@ To check the build without running tests:
 ```bash
 go build ./...
 go vet ./...
+# Or: make build vet
 ```
 
 ---
@@ -585,6 +639,7 @@ Likely next moves, in rough order of value-per-effort:
 ```
 .
 ├── .gitignore
+├── Makefile                   (setup, models, build, test, ask, reset)
 ├── README.md                  (this file)
 ├── go.mod
 ├── go.sum
