@@ -3,9 +3,14 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
 
 	"emails-rag/internal/embed"
 	"emails-rag/internal/llm"
@@ -41,7 +46,30 @@ func main() {
 	searcher.TopK = *topK
 	searcher.SourceType = *source
 
-	fmt.Println(`Ask away. Empty line exits.`)
+	// Ctrl-C during a query cancels that query; Ctrl-C at the prompt exits.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
+	var (
+		cancelMu      sync.Mutex
+		cancelCurrent context.CancelFunc
+	)
+	go func() {
+		for range sigCh {
+			cancelMu.Lock()
+			c := cancelCurrent
+			cancelCurrent = nil
+			cancelMu.Unlock()
+			if c != nil {
+				c()
+			} else {
+				fmt.Fprintln(os.Stderr, "\n(interrupted)")
+				os.Exit(130)
+			}
+		}
+	}()
+
+	fmt.Println(`Ask away. Empty line exits. Ctrl-C cancels the current query.`)
 	fmt.Println(`Prefix with "source:pdf " or "source:mbox " to filter a single query.`)
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 4096), 1<<20)
@@ -55,10 +83,26 @@ func main() {
 		if q == "" {
 			break
 		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancelMu.Lock()
+		cancelCurrent = cancel
+		cancelMu.Unlock()
+
 		fmt.Println()
-		ans, results, err := searcher.Answer(context.Background(), q, func(tok string) {
+		ans, results, err := searcher.Answer(ctx, q, func(tok string) {
 			fmt.Print(tok)
 		})
+
+		cancelMu.Lock()
+		cancelCurrent = nil
+		cancelMu.Unlock()
+		cancel()
+
+		if errors.Is(err, context.Canceled) || ctx.Err() == context.Canceled {
+			fmt.Fprintln(os.Stderr, "\n(cancelled)")
+			continue
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "\nerror:", err)
 			continue
@@ -70,15 +114,16 @@ func main() {
 		}
 		fmt.Println("\nSources:")
 		for i, r := range results {
-			fmt.Printf("  [%d] %s (score=%.3f)\n", i+1, formatSource(r), r.Score)
+			fmt.Printf("  [%d] %s (score=%.3f)\n", i+1, sourceHeader(r), r.Score)
+			fmt.Printf("      %s\n", snippet(r.Chunk.Content, 100))
 		}
 	}
 }
 
-// formatSource renders a hit's provenance. For email chunks, surfaces the
+// sourceHeader renders a hit's provenance. For email chunks, surfaces the
 // subject and date from stored metadata so citations are useful for skim-back;
 // for PDFs and anything else, falls back to the source path.
-func formatSource(r store.Result) string {
+func sourceHeader(r store.Result) string {
 	if r.Chunk.SourceType != "mbox" {
 		return r.Chunk.Source
 	}
@@ -94,4 +139,14 @@ func formatSource(r store.Result) string {
 	default:
 		return r.Chunk.Source
 	}
+}
+
+// snippet collapses whitespace and truncates to n runes for a one-line preview.
+func snippet(s string, n int) string {
+	s = strings.Join(strings.Fields(s), " ")
+	runes := []rune(s)
+	if len(runes) <= n {
+		return s
+	}
+	return string(runes[:n]) + "..."
 }

@@ -282,13 +282,14 @@ go run ./cmd/index \
 
 Both flags are repeatable. A failure on any one path (broken file, OCR crash, parser issue) is logged but does not abort the rest of the run.
 
-**Re-running is safe.** `cmd/index` records each source path in the database; a subsequent run on the same path is skipped:
+**Re-running is safe.** Dedup works differently for the two source types:
 
-```text
-level=INFO msg="skipping already-indexed pdf" path=...
-```
+- **PDFs dedup by file path.** A subsequent indexer run on the same path is skipped entirely (`level=INFO msg="skipping already-indexed pdf" path=...`). To re-ingest a changed PDF, remove its rows from SQLite first.
+- **MBOX archives dedup per message** by the RFC 5322 `Message-ID` header (with a `From`+`Date`+`Subject`+body-prefix fingerprint as fallback for messages without one). This means you can re-run the indexer on a growing mbox and only the new mail is ingested:
 
-To actually re-ingest a source you've changed, you need to either remove its rows from SQLite or start with a fresh database (see [Resetting the index](#resetting-the-index)).
+  ```text
+  level=INFO msg="indexed mbox" path=... messages_indexed=42 messages_skipped=8410 chunks=137
+  ```
 
 **Scanned PDFs are handled automatically.** If `pdftotext` returns near-empty output (fewer than 100 visible characters), the indexer transparently runs `ocrmypdf --skip-text --quiet` against a temp PDF, then re-extracts. This is slow per page (OCR is expensive), but it only happens when needed.
 
@@ -304,21 +305,23 @@ go run ./cmd/ask
 The REPL prints:
 
 ```text
-Ask away. Empty line exits.
+Ask away. Empty line exits. Ctrl-C cancels the current query.
 Prefix with "source:pdf " or "source:mbox " to filter a single query.
 
 >
 ```
 
-Tokens stream as the chat model generates. After the answer completes, a `Sources:` block lists the retrieved chunks with similarity scores. For mbox hits, the line includes the subject and date pulled from the email headers:
+Tokens stream as the chat model generates. After the answer completes, a `Sources:` block lists the retrieved chunks with similarity scores. For mbox hits the line includes the subject and date pulled from the email headers. Each citation is followed by an ~100-character preview of the matched chunk so you can sanity-check what retrieval landed on:
 
 ```text
 Sources:
   [1] /Users/me/mail/personal.mbox: "Re: Q3 numbers" — Mon, 15 Mar 2024 09:12:00 -0400 (score=0.812)
+      looking at the breakdown for Q3, we hit 102% of target despite the supply chain hiccup in...
   [2] /Users/me/Documents/contracts/lease.pdf (score=0.749)
+      Subletting requires written consent from Landlord and shall not be unreasonably withheld...
 ```
 
-**Empty line exits.** `Ctrl-C` also works but cannot currently interrupt an in-flight LLM generation (the per-query context is `context.Background()` — see [Extending](#extending)).
+**Empty line exits.** **`Ctrl-C` cancels the current query** without exiting the program — the streaming output stops, you see `(cancelled)`, and you're back at the prompt. A second `Ctrl-C` at the empty prompt exits.
 
 ### Filtering by source type
 
@@ -367,7 +370,7 @@ Bulk ingest PDFs and MBOX archives into the SQLite index.
 
 Behavior notes:
 
-- Source dedup is by file path. Indexing the same path twice is a no-op; modifying a source and re-indexing requires removing the old rows first.
+- PDFs dedup by file path (same path = full skip). MBOX archives dedup per message by `Message-ID` (with a content-fingerprint fallback) so re-running on a growing mbox is safe and incremental.
 - PDFs are extracted via `pdftotext -layout`. If output is below the OCR threshold (100 visible chars), `ocrmypdf` runs on a temp copy and the result is re-extracted.
 - MBOX messages are parsed as RFC 5322 with full MIME walking: `multipart/alternative` prefers `text/plain`; HTML parts are stripped; `quoted-printable` and `base64` transfer encodings are decoded; RFC 2047 encoded headers (`=?UTF-8?B?...?=`) are decoded.
 - Email metadata (`from`, `to`, `subject`, `date`) is stored alongside each chunk and surfaced in the `ask` Sources block.
@@ -424,7 +427,7 @@ question ──► embed.Embed ──► store.Search ──► llm.Chat (stream
 - **Shell out for PDF text.** `pdftotext` produces better layout-aware text than any pure-Go PDF library, at the cost of a system dependency.
 - **OCR is auto-detected, not flagged.** If text extraction returns less than 100 visible characters, OCR runs. If `ocrmypdf` is missing or fails, the original sparse text is kept (no hard failure).
 - **Streaming is built into the LLM client.** The Ollama `/api/chat` endpoint is consumed as NDJSON; the client invokes a callback per token while assembling the full string.
-- **Dedup is per-source-path.** The simplest possible idempotency. Trade-off: re-indexing a mutated mbox skips it entirely (see Extending: Message-ID dedup).
+- **PDFs dedup by source path; MBOX deduplicates per message.** Each email's `Message-ID` (or a content fingerprint when missing) is stored alongside its chunks; re-indexing a growing mbox only ingests the new mail. PDFs use the simpler path-based skip; mutate one and you need to delete its rows before re-indexing.
 
 ---
 
@@ -624,13 +627,12 @@ You'll still need to install poppler, ocrmypdf, Ollama, and pull the models on t
 
 Likely next moves, in rough order of value-per-effort:
 
-- **Cancellable queries.** `cmd/ask/main.go` currently uses `context.Background()` per query; thread `signal.NotifyContext` so `Ctrl-C` aborts a long LLM generation cleanly.
-- **Message-ID dedup for MBOX.** Today the indexer dedups by source path, so appending new messages to an existing mbox is invisible. Switch to dedup by `Message-ID` header to support incremental ingest.
-- **Per-source filter for one PDF directory.** If you want to ask only against, say, `~/Documents/legal`, the current `-source pdf` flag is too coarse. Add a substring/glob filter on `source`.
+- **Hybrid BM25 + vector search.** SQLite ships FTS5, so no new dependency. Run both rankers, fuse with reciprocal-rank, take top-k. Real quality win on queries that hinge on rare keywords (proper nouns, account numbers, error codes) where pure semantic search wanders.
 - **Reranking.** After cosine top-k, run a small cross-encoder before passing to the chat model. Bigger quality bump for queries where the top-k contains the right chunks but in the wrong order.
-- **Hybrid search.** Combine vector similarity with BM25 via SQLite's FTS5 module — helps for queries that lean on rare keywords.
+- **Per-source-path filter.** If you want to ask only against, say, `~/Documents/legal`, the current `-source pdf` flag is too coarse. Add a substring/glob filter on `source`.
 - **`sqlite-vec` swap.** When the corpus crosses ~100k chunks and brute-force scans get sluggish, replace `internal/store/sqlite.go` with a `sqlite-vec`-backed implementation. The public `Store.Search` signature is the contract; keep it stable and nothing else changes.
 - **Pluggable LLM backends.** The `llm.Client` is small and HTTP-shaped. A sibling `internal/llm/openai.go` would let you switch backends with a flag.
+- **Web UI.** A tiny local HTTP server with a single-page chat interface — stdlib `net/http` is enough. Lets you query from a browser without leaving the terminal.
 
 ---
 
@@ -649,7 +651,7 @@ Likely next moves, in rough order of value-per-effort:
 └── internal/
     ├── extract/
     │   ├── pdf.go             pdftotext + ocrmypdf fallback
-    │   ├── mbox.go            RFC 5322 + full MIME walk
+    │   ├── mbox.go            RFC 5322 + full MIME walk (captures Message-ID)
     │   └── mbox_test.go
     ├── chunk/
     │   ├── chunk.go           paragraph-aware overlapping splitter
@@ -660,7 +662,8 @@ Likely next moves, in rough order of value-per-effort:
     │   ├── sqlite.go          schema + float32 BLOB vector store
     │   └── sqlite_test.go
     └── pipeline/
-        ├── index.go           extract → chunk → embed → store
+        ├── index.go           extract → chunk → embed → store (per-message dedup)
+        ├── index_test.go
         ├── search.go          embed → cosine → chat (streaming)
         └── search_test.go
 ```

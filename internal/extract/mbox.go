@@ -17,11 +17,12 @@ import (
 
 // Message represents a single parsed email from an MBOX file.
 type Message struct {
-	From    string
-	To      string
-	Subject string
-	Date    string
-	Body    string
+	From      string
+	To        string
+	Subject   string
+	Date      string
+	MessageID string
+	Body      string
 }
 
 // MBOX parses an MBOX file and yields each message via the callback.
@@ -80,11 +81,12 @@ func parseMessage(raw []byte) (Message, error) {
 		body = string(rawBody)
 	}
 	return Message{
-		From:    decodeHeader(msg.Header.Get("From")),
-		To:      decodeHeader(msg.Header.Get("To")),
-		Subject: decodeHeader(msg.Header.Get("Subject")),
-		Date:    msg.Header.Get("Date"),
-		Body:    strings.TrimSpace(body),
+		From:      decodeHeader(msg.Header.Get("From")),
+		To:        decodeHeader(msg.Header.Get("To")),
+		Subject:   decodeHeader(msg.Header.Get("Subject")),
+		Date:      msg.Header.Get("Date"),
+		MessageID: strings.TrimSpace(msg.Header.Get("Message-ID")),
+		Body:      strings.TrimSpace(body),
 	}, nil
 }
 

@@ -11,10 +11,13 @@ import (
 )
 
 // Chunk is a stored text chunk with its embedding and metadata.
+// MessageID, when non-empty, identifies the source email and is used for
+// per-message dedup so that re-indexing a growing mbox only ingests new mail.
 type Chunk struct {
 	ID         int64
 	Source     string
 	SourceType string
+	MessageID  string
 	Content    string
 	Metadata   map[string]string
 	Embedding  []float32
@@ -49,20 +52,57 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
-// migrate creates the schema if it does not yet exist.
+// migrate creates the schema for a fresh database and lifts any older
+// pre-existing database forward to the current schema. Schema versions are
+// tracked via PRAGMA user_version.
+//
+// Versions:
+//
+//	0 → initial schema
+//	1 → adds chunks.message_id and its index for per-message dedup
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+	if _, err := s.db.Exec(`
 	CREATE TABLE IF NOT EXISTS chunks (
 		id          INTEGER PRIMARY KEY AUTOINCREMENT,
 		source      TEXT NOT NULL,
 		source_type TEXT NOT NULL,
 		content     TEXT NOT NULL,
 		metadata    TEXT NOT NULL,
-		embedding   BLOB NOT NULL
+		embedding   BLOB NOT NULL,
+		message_id  TEXT NOT NULL DEFAULT ''
 	);
 	CREATE INDEX IF NOT EXISTS chunks_source ON chunks(source);
-	`)
-	return err
+	`); err != nil {
+		return err
+	}
+
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version < 1 {
+		// Pre-existing databases predate the message_id column. CREATE TABLE
+		// IF NOT EXISTS won't add columns to an existing table, so do it here.
+		var hasCol int
+		if err := s.db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info('chunks') WHERE name = 'message_id'`,
+		).Scan(&hasCol); err != nil {
+			return err
+		}
+		if hasCol == 0 {
+			if _, err := s.db.Exec(`ALTER TABLE chunks ADD COLUMN message_id TEXT NOT NULL DEFAULT ''`); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.Exec(`PRAGMA user_version = 1`); err != nil {
+			return err
+		}
+	}
+	// Index creation runs after any ALTER TABLE so the column is guaranteed to exist.
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS chunks_message_id ON chunks(message_id)`); err != nil {
+		return err
+	}
+	return nil
 }
 
 // InsertBatch stores multiple chunks in a single transaction.
@@ -74,7 +114,7 @@ func (s *Store) InsertBatch(ctx context.Context, chunks []Chunk) error {
 	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO chunks (source, source_type, content, metadata, embedding) VALUES (?,?,?,?,?)`)
+		`INSERT INTO chunks (source, source_type, message_id, content, metadata, embedding) VALUES (?,?,?,?,?,?)`)
 	if err != nil {
 		return err
 	}
@@ -85,7 +125,7 @@ func (s *Store) InsertBatch(ctx context.Context, chunks []Chunk) error {
 		if err != nil {
 			return err
 		}
-		if _, err := stmt.ExecContext(ctx, c.Source, c.SourceType, c.Content, string(meta), encodeVec(c.Embedding)); err != nil {
+		if _, err := stmt.ExecContext(ctx, c.Source, c.SourceType, c.MessageID, c.Content, string(meta), encodeVec(c.Embedding)); err != nil {
 			return err
 		}
 	}
@@ -102,10 +142,10 @@ func (s *Store) Search(ctx context.Context, query []float32, k int, sourceType s
 	)
 	if sourceType == "" {
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT id, source, source_type, content, metadata, embedding FROM chunks`)
+			`SELECT id, source, source_type, message_id, content, metadata, embedding FROM chunks`)
 	} else {
 		rows, err = s.db.QueryContext(ctx,
-			`SELECT id, source, source_type, content, metadata, embedding FROM chunks WHERE source_type = ?`,
+			`SELECT id, source, source_type, message_id, content, metadata, embedding FROM chunks WHERE source_type = ?`,
 			sourceType)
 	}
 	if err != nil {
@@ -119,7 +159,7 @@ func (s *Store) Search(ctx context.Context, query []float32, k int, sourceType s
 		var c Chunk
 		var metaJSON string
 		var emb []byte
-		if err := rows.Scan(&c.ID, &c.Source, &c.SourceType, &c.Content, &metaJSON, &emb); err != nil {
+		if err := rows.Scan(&c.ID, &c.Source, &c.SourceType, &c.MessageID, &c.Content, &metaJSON, &emb); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(metaJSON), &c.Metadata); err != nil {
@@ -140,6 +180,20 @@ func (s *Store) HasSource(ctx context.Context, source string) (bool, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE source = ?`, source).Scan(&n)
 	return n > 0, err
+}
+
+// HasMessageID reports whether any chunks already exist for the given email
+// Message-ID (or fingerprint). Used for incremental MBOX ingest.
+func (s *Store) HasMessageID(ctx context.Context, id string) (bool, error) {
+	if id == "" {
+		return false, nil
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM chunks WHERE message_id = ? LIMIT 1`, id).Scan(&n)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // Stats returns the total chunk count.

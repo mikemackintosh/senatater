@@ -115,6 +115,22 @@ func TestParseMessage_Base64(t *testing.T) {
 	}
 }
 
+func TestParseMessage_CapturesMessageID(t *testing.T) {
+	raw := "From: alice@example.com\r\n" +
+		"Subject: hi\r\n" +
+		"Message-ID: <abc123@example.com>\r\n" +
+		"Content-Type: text/plain\r\n" +
+		"\r\n" +
+		"body\r\n"
+	m, err := parseMessage([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.MessageID != "<abc123@example.com>" {
+		t.Errorf("MessageID: %q", m.MessageID)
+	}
+}
+
 func TestParseMessage_RFC2047Subject(t *testing.T) {
 	raw := "From: alice@example.com\r\n" +
 		"Subject: =?UTF-8?B?Q2Fmw6kgbWVldGluZw==?=\r\n" +
