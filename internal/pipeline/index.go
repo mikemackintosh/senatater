@@ -83,9 +83,14 @@ func (i *Indexer) IndexMBOX(ctx context.Context, path string) error {
 			"subject": m.Subject,
 			"date":    m.Date,
 		}
+		if err := i.embedAndStore(ctx, path, "mbox", id, chunks, meta); err != nil {
+			return err
+		}
+		// Counters only advance once the chunks are actually persisted, so
+		// the summary log line never overstates progress on partial failures.
 		chunkCount += len(chunks)
 		indexed++
-		return i.embedAndStore(ctx, path, "mbox", id, chunks, meta)
+		return nil
 	})
 	i.Log.Info("indexed mbox",
 		"path", path,
