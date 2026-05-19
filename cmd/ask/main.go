@@ -29,39 +29,51 @@ func main() {
 		chatKey    = flag.String("chat-key", "", "bearer token for OpenAI-compatible servers (optional)")
 		topK       = flag.Int("k", 6, "number of chunks to retrieve")
 		source     = flag.String("source", "", `default source filter: "pdf", "mbox", or "" for all`)
+		noColor    = flag.Bool("no-color", false, "disable ANSI colors (NO_COLOR env var also honored)")
 	)
 	flag.Parse()
 
+	u := newUI(*noColor)
+
 	if *source != "" && *source != "pdf" && *source != "mbox" {
-		fmt.Fprintln(os.Stderr, `-source must be "pdf", "mbox", or empty`)
+		u.errorf(`-source must be "pdf", "mbox", or empty`)
 		os.Exit(2)
 	}
 	if *chatAPI != "ollama" && *chatAPI != "openai" {
-		fmt.Fprintln(os.Stderr, `-chat-api must be "ollama" or "openai"`)
+		u.errorf(`-chat-api must be "ollama" or "openai"`)
 		os.Exit(2)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(*dbPath), 0o755); err != nil {
-		fmt.Fprintln(os.Stderr, "create db dir:", err)
+		u.errorf("create db dir: %v", err)
 		os.Exit(1)
 	}
 	s, err := store.Open(*dbPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "open store:", err)
+		u.errorf("open store: %v", err)
 		os.Exit(1)
 	}
 	defer s.Close()
 
-	if total, _ := s.Stats(context.Background()); total == 0 {
-		fmt.Fprintln(os.Stderr,
-			"warning: the index is empty. Run `go run ./cmd/index -pdf-dir ... -mbox ...` first.")
-	}
+	chunkCount, _ := s.Stats(context.Background())
 
 	e := embed.New(*embedModel)
 	l := llm.New(llm.Backend(*chatAPI), *chatModel, *chatURL, *chatKey)
 	searcher := pipeline.NewSearcher(e, l, s)
 	searcher.TopK = *topK
 	searcher.SourceType = *source
+
+	u.printBanner(bannerConfig{
+		DBPath:     *dbPath,
+		ChunkCount: chunkCount,
+		EmbedModel: *embedModel,
+		EmbedURL:   "http://localhost:11434",
+		ChatModel:  *chatModel,
+		ChatURL:    chatURLDisplay(*chatAPI, *chatURL),
+		ChatAPI:    *chatAPI,
+		TopK:       *topK,
+		Source:     *source,
+	})
 
 	// Ctrl-C during a query cancels that query; Ctrl-C at the prompt exits.
 	sigCh := make(chan os.Signal, 1)
@@ -80,19 +92,17 @@ func main() {
 			if c != nil {
 				c()
 			} else {
-				fmt.Fprintln(os.Stderr, "\n(interrupted)")
+				u.notice("\n(interrupted)")
 				os.Exit(130)
 			}
 		}
 	}()
 
-	fmt.Println(`Ask away. Empty line exits. Ctrl-C cancels the current query.`)
-	fmt.Println(`Prefix with "source:pdf " or "source:mbox " to filter a single query.`)
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 0, 4096), 1<<20)
 
 	for {
-		fmt.Print("\n> ")
+		u.prompt()
 		if !in.Scan() {
 			break
 		}
@@ -107,17 +117,14 @@ func main() {
 		cancelMu.Unlock()
 
 		fmt.Println()
-		// Stage indicators are written to stderr and overwritten by the
-		// first streamed token, so a hung stage is immediately visible
-		// without polluting the final answer.
 		var stagePrinted bool
 		searcher.OnStage = func(stage string) {
-			fmt.Fprintf(os.Stderr, "\r(%s...)        ", stage)
+			u.showStage(stage)
 			stagePrinted = true
 		}
 		ans, results, err := searcher.Answer(ctx, q, func(tok string) {
 			if stagePrinted {
-				fmt.Fprint(os.Stderr, "\r              \r")
+				u.clearStage()
 				stagePrinted = false
 			}
 			fmt.Print(tok)
@@ -129,28 +136,37 @@ func main() {
 		cancel()
 
 		if stagePrinted {
-			fmt.Fprint(os.Stderr, "\r              \r")
+			u.clearStage()
 		}
 
 		if errors.Is(err, context.Canceled) || ctx.Err() == context.Canceled {
-			fmt.Fprintln(os.Stderr, "\n(cancelled)")
+			u.notice("\n(cancelled)")
 			continue
 		}
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "\nerror:", err)
+			u.errorf("%v", err)
 			continue
 		}
 		if ans == "" {
-			fmt.Println("(no response)")
+			u.notice("(no response)")
 		} else {
 			fmt.Println()
 		}
-		fmt.Println("\nSources:")
-		for i, r := range results {
-			fmt.Printf("  [%d] %s (score=%.3f)\n", i+1, sourceHeader(r), r.Score)
-			fmt.Printf("      %s\n", snippet(r.Chunk.Content, 100))
-		}
+		u.renderSources(results)
 	}
+}
+
+// chatURLDisplay returns the chat server URL the client will actually use,
+// resolving the empty-default-per-backend rule so the banner doesn't show
+// a misleading blank.
+func chatURLDisplay(api, url string) string {
+	if url != "" {
+		return url
+	}
+	if api == "openai" {
+		return "http://localhost:8000"
+	}
+	return "http://localhost:11434"
 }
 
 // sourceHeader renders a hit's provenance. For email chunks, surfaces the
