@@ -440,7 +440,7 @@ In a `tmux` session so it survives logout:
 
 ```bash
 tmux new -s vllm
-docker run --rm --runtime nvidia --gpus all \
+docker run --rm --gpus all \
   -v ~/hf-cache:/root/.cache/huggingface \
   -p 8000:8000 \
   --ipc=host \
@@ -455,10 +455,28 @@ docker run --rm --runtime nvidia --gpus all \
 
 Notable flags:
 
+- `--gpus all` is the modern way to grant GPU access via the NVIDIA Container Toolkit. The older `--runtime nvidia` form is redundant on Docker 19.03+ and fails with `unknown or invalid runtime name: nvidia` on hosts where the runtime hasn't been explicitly registered.
 - `--host 0.0.0.0` is critical — without it the server only listens on the container's loopback and the Mac can't reach it.
 - `--max-model-len 16384` is generous; raise it if you intend to use longer contexts and lower it if you hit OOM.
 - `--gpu-memory-utilization 0.9` leaves a small headroom; on the DGX Spark's 128 GB unified memory this is plenty for Qwen3-32B at FP16.
 - `--ipc=host` is required by vLLM for shared-memory between workers.
+
+If `--gpus all` itself errors with something like `could not select device driver "" with capabilities: [[gpu]]`, the NVIDIA Container Toolkit isn't installed. Install and register it:
+
+```bash
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | \
+  sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+  sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+  sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+sudo apt-get update
+sudo apt-get install -y nvidia-container-toolkit
+sudo nvidia-ctk runtime configure --runtime=docker
+sudo systemctl restart docker
+
+# Verify
+docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
+```
 
 Detach from tmux with `Ctrl-b d`; reattach with `tmux attach -t vllm`.
 
