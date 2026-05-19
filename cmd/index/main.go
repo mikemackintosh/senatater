@@ -21,9 +21,11 @@ func main() {
 		embedModel = flag.String("embed-model", "nomic-embed-text", "ollama embedding model name")
 		force      = flag.Bool("force", false, "re-ingest sources already in the index (deletes prior chunks for each touched source)")
 		pdfDirs    multiFlag
+		pdfFiles   multiFlag
 		mboxFiles  multiFlag
 	)
 	flag.Var(&pdfDirs, "pdf-dir", "directory to walk for .pdf files (repeatable)")
+	flag.Var(&pdfFiles, "pdf", "path to a single .pdf file to index (repeatable)")
 	flag.Var(&mboxFiles, "mbox", "path to an mbox file to index (repeatable)")
 	flag.Parse()
 
@@ -63,6 +65,12 @@ func main() {
 		})
 		if err != nil {
 			log.Error("walk pdfs", "dir", dir, "err", err)
+		}
+	}
+
+	for _, file := range pdfFiles {
+		if err := idx.IndexPDF(ctx, file); err != nil {
+			log.Error("index pdf", "path", file, "err", err)
 		}
 	}
 
