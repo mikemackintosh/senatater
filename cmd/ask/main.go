@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,12 +41,21 @@ func main() {
 		os.Exit(2)
 	}
 
+	if err := os.MkdirAll(filepath.Dir(*dbPath), 0o755); err != nil {
+		fmt.Fprintln(os.Stderr, "create db dir:", err)
+		os.Exit(1)
+	}
 	s, err := store.Open(*dbPath)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "open store:", err)
 		os.Exit(1)
 	}
 	defer s.Close()
+
+	if total, _ := s.Stats(context.Background()); total == 0 {
+		fmt.Fprintln(os.Stderr,
+			"warning: the index is empty. Run `go run ./cmd/index -pdf-dir ... -mbox ...` first.")
+	}
 
 	e := embed.New(*embedModel)
 	l := llm.New(llm.Backend(*chatAPI), *chatModel, *chatURL, *chatKey)
