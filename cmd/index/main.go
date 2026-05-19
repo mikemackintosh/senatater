@@ -19,6 +19,7 @@ func main() {
 	var (
 		dbPath     = flag.String("db", "data/index.db", "path to the sqlite index file")
 		embedModel = flag.String("embed-model", "nomic-embed-text", "ollama embedding model name")
+		force      = flag.Bool("force", false, "re-ingest sources already in the index (deletes prior chunks for each touched source)")
 		pdfDirs    multiFlag
 		mboxFiles  multiFlag
 	)
@@ -45,6 +46,7 @@ func main() {
 
 	e := embed.New(*embedModel)
 	idx := pipeline.New(e, s, log)
+	idx.Force = *force
 
 	for _, dir := range pdfDirs {
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {

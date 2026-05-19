@@ -20,6 +20,11 @@ type Indexer struct {
 	Log      *slog.Logger
 	Chunker  chunk.Options
 	Batch    int
+
+	// Force, when true, re-indexes sources that are already in the store
+	// (PDFs by path, MBOX messages by Message-ID). The existing chunks for
+	// any source touched in this run are deleted before re-ingestion.
+	Force bool
 }
 
 // New returns an Indexer with sensible defaults.
@@ -34,15 +39,24 @@ func New(e *embed.Client, s *store.Store, log *slog.Logger) *Indexer {
 }
 
 // IndexPDF extracts, chunks, embeds, and stores a single PDF file.
-// PDFs dedup by file path: indexing the same path twice is a no-op.
+// PDFs dedup by file path: indexing the same path twice is a no-op
+// unless Force is set. On any error during embedding the partial state
+// is rolled back, so a crashed run never leaves a half-indexed PDF
+// silently masquerading as complete to future dedup checks.
 func (i *Indexer) IndexPDF(ctx context.Context, path string) error {
 	has, err := i.Store.HasSource(ctx, path)
 	if err != nil {
 		return err
 	}
 	if has {
-		i.Log.Info("skipping already-indexed pdf", "path", path)
-		return nil
+		if !i.Force {
+			i.Log.Info("skipping already-indexed pdf", "path", path)
+			return nil
+		}
+		i.Log.Info("force re-indexing pdf, removing prior chunks", "path", path)
+		if err := i.Store.DeleteBySource(ctx, path); err != nil {
+			return fmt.Errorf("delete prior chunks: %w", err)
+		}
 	}
 
 	text, err := extract.PDF(ctx, path)
@@ -53,13 +67,30 @@ func (i *Indexer) IndexPDF(ctx context.Context, path string) error {
 	i.Log.Info("indexing pdf", "path", path, "chunks", len(chunks))
 
 	prog := newProgress(i.Log, "embedding pdf")
-	return i.embedAndStore(ctx, path, "pdf", "", chunks, nil, prog)
+	if err := i.embedAndStore(ctx, path, "pdf", "", chunks, nil, prog); err != nil {
+		// Partial-write protection: if any batch failed, remove the chunks
+		// that did make it in so the next run starts clean instead of
+		// being short-circuited by HasSource.
+		if rmErr := i.Store.DeleteBySource(ctx, path); rmErr != nil {
+			i.Log.Error("rollback failed", "path", path, "err", rmErr)
+		}
+		return err
+	}
+	return nil
 }
 
 // IndexMBOX walks an MBOX file, indexing each new message. Dedup is per
 // message rather than per file, so appending mail to an existing archive
-// only ingests the new messages on the next run.
+// only ingests the new messages on the next run. If Force is set, every
+// existing chunk for this source path is removed before walking so the
+// mbox is re-ingested in full.
 func (i *Indexer) IndexMBOX(ctx context.Context, path string) error {
+	if i.Force {
+		i.Log.Info("force re-indexing mbox, removing prior chunks", "path", path)
+		if err := i.Store.DeleteBySource(ctx, path); err != nil {
+			return fmt.Errorf("delete prior chunks: %w", err)
+		}
+	}
 	var indexed, skipped, chunkCount int
 	prog := newProgress(i.Log, "indexing mbox")
 	err := extract.MBOX(path, func(m extract.Message) error {

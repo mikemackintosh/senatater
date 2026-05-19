@@ -140,6 +140,32 @@ func TestMigrate_AddsMessageIDToLegacyDB(t *testing.T) {
 	}
 }
 
+func TestDeleteBySource(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+
+	if err := s.InsertBatch(ctx, []Chunk{
+		{Source: "a.pdf", SourceType: "pdf", Content: "one", Metadata: map[string]string{}, Embedding: []float32{0.1}},
+		{Source: "a.pdf", SourceType: "pdf", Content: "two", Metadata: map[string]string{}, Embedding: []float32{0.2}},
+		{Source: "b.pdf", SourceType: "pdf", Content: "three", Metadata: map[string]string{}, Embedding: []float32{0.3}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.DeleteBySource(ctx, "a.pdf"); err != nil {
+		t.Fatal(err)
+	}
+
+	hasA, _ := s.HasSource(ctx, "a.pdf")
+	hasB, _ := s.HasSource(ctx, "b.pdf")
+	if hasA {
+		t.Errorf("a.pdf chunks should be gone")
+	}
+	if !hasB {
+		t.Errorf("b.pdf chunks should still exist")
+	}
+}
+
 func newStore(t *testing.T) *Store {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "test.db")

@@ -182,6 +182,13 @@ func (s *Store) HasSource(ctx context.Context, source string) (bool, error) {
 	return n > 0, err
 }
 
+// DeleteBySource removes every chunk previously stored for the given source path.
+// Used to roll back a partial indexing run and to support -force re-ingestion.
+func (s *Store) DeleteBySource(ctx context.Context, source string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source)
+	return err
+}
+
 // HasMessageID reports whether any chunks already exist for the given email
 // Message-ID (or fingerprint). Used for incremental MBOX ingest.
 func (s *Store) HasMessageID(ctx context.Context, id string) (bool, error) {
