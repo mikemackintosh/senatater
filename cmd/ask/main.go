@@ -107,7 +107,19 @@ func main() {
 		cancelMu.Unlock()
 
 		fmt.Println()
+		// Stage indicators are written to stderr and overwritten by the
+		// first streamed token, so a hung stage is immediately visible
+		// without polluting the final answer.
+		var stagePrinted bool
+		searcher.OnStage = func(stage string) {
+			fmt.Fprintf(os.Stderr, "\r(%s...)        ", stage)
+			stagePrinted = true
+		}
 		ans, results, err := searcher.Answer(ctx, q, func(tok string) {
+			if stagePrinted {
+				fmt.Fprint(os.Stderr, "\r              \r")
+				stagePrinted = false
+			}
 			fmt.Print(tok)
 		})
 
@@ -115,6 +127,10 @@ func main() {
 		cancelCurrent = nil
 		cancelMu.Unlock()
 		cancel()
+
+		if stagePrinted {
+			fmt.Fprint(os.Stderr, "\r              \r")
+		}
 
 		if errors.Is(err, context.Canceled) || ctx.Err() == context.Canceled {
 			fmt.Fprintln(os.Stderr, "\n(cancelled)")

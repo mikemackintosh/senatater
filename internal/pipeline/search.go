@@ -21,6 +21,11 @@ type Searcher struct {
 	Store      *store.Store
 	TopK       int
 	SourceType string // default filter; "" means all types
+
+	// OnStage, if set, is invoked at the start of each pipeline stage
+	// ("embedding", "searching", "generating") so the CLI can show the user
+	// what's currently blocking. Stages always run in that order.
+	OnStage func(stage string)
 }
 
 // NewSearcher returns a Searcher with default top-k retrieval.
@@ -37,20 +42,30 @@ func (s *Searcher) Answer(ctx context.Context, question string, onToken func(str
 		filter = s.SourceType
 	}
 
+	s.stage("embedding")
 	vecs, err := s.Embedder.Embed(ctx, []string{q})
 	if err != nil {
 		return "", nil, err
 	}
+
+	s.stage("searching")
 	results, err := s.Store.Search(ctx, vecs[0], s.TopK, filter)
 	if err != nil {
 		return "", nil, err
 	}
 
+	s.stage("generating")
 	answer, err := s.LLM.Chat(ctx, []llm.Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: buildPrompt(q, results)},
 	}, onToken)
 	return answer, results, err
+}
+
+func (s *Searcher) stage(name string) {
+	if s.OnStage != nil {
+		s.OnStage(name)
+	}
 }
 
 // parseSourceFilter strips an optional leading "source:<type>" token from the
