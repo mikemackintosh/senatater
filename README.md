@@ -423,12 +423,14 @@ As of `huggingface_hub` 1.x the CLI is `hf`; the older `huggingface-cli` binary 
 
 ```bash
 mkdir -p ~/hf-cache
-docker run --rm \
+docker run --rm -it \
   -v ~/hf-cache:/root/.cache/huggingface \
   --entrypoint hf \
   vllm/vllm-openai:latest \
   download Qwen/Qwen3-32B
 ```
+
+**The `-it` flag matters.** Without it, Docker doesn't attach a TTY, `tqdm` can't render progress bars, and the download appears stuck at "Fetching 27 files" with no movement — even though weights are streaming to disk. With `-it` you get live progress. If you'd rather verify another way, in a second SSH session run `watch -n 2 du -sh ~/hf-cache` and confirm the size is climbing toward ~65 GB.
 
 If the image you pulled is older and ships only `huggingface-cli`, either `docker pull vllm/vllm-openai:latest` again to refresh it, or skip this step entirely — vLLM will fetch the weights itself on first launch in step 3.
 
