@@ -417,16 +417,20 @@ docker pull vllm/vllm-openai:latest
 
 #### 2. (Optional) Pre-cache the model
 
-vLLM will pull the weights on first run, but pre-fetching makes the first launch fast and surfaces any HuggingFace auth issues immediately. The Qwen3 models on the [Qwen org](https://huggingface.co/Qwen) are public, so no token is needed:
+vLLM will pull the weights on first run, but pre-fetching makes the first launch fast and surfaces any HuggingFace auth issues immediately. The Qwen3 models on the [Qwen org](https://huggingface.co/Qwen) are public, so no token is needed.
+
+As of `huggingface_hub` 1.x the CLI is `hf`; the older `huggingface-cli` binary is deprecated and no longer functional. Use:
 
 ```bash
 mkdir -p ~/hf-cache
 docker run --rm \
   -v ~/hf-cache:/root/.cache/huggingface \
-  --entrypoint huggingface-cli \
+  --entrypoint hf \
   vllm/vllm-openai:latest \
   download Qwen/Qwen3-32B
 ```
+
+If the image you pulled is older and ships only `huggingface-cli`, either `docker pull vllm/vllm-openai:latest` again to refresh it, or skip this step entirely — vLLM will fetch the weights itself on first launch in step 3.
 
 #### 3. Launch the server
 
