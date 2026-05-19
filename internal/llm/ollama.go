@@ -11,57 +11,54 @@ import (
 	"time"
 )
 
-// Client communicates with a local Ollama server for chat completions.
-type Client struct {
+const defaultOllamaURL = "http://localhost:11434"
+
+// OllamaClient communicates with an Ollama server's /api/chat endpoint.
+type OllamaClient struct {
 	BaseURL string
 	Model   string
 	HTTP    *http.Client
 }
 
-// New returns a Client configured for the standard local Ollama endpoint.
-func New(model string) *Client {
-	return &Client{
-		BaseURL: "http://localhost:11434",
+// NewOllama returns a client targeting an Ollama server. Empty baseURL
+// defaults to http://localhost:11434.
+func NewOllama(model, baseURL string) *OllamaClient {
+	if baseURL == "" {
+		baseURL = defaultOllamaURL
+	}
+	return &OllamaClient{
+		BaseURL: baseURL,
 		Model:   model,
 		HTTP:    &http.Client{Timeout: 10 * time.Minute},
 	}
 }
 
-// Message represents one turn in a chat conversation.
-type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
-type chatOptions struct {
+type ollamaChatOptions struct {
 	Temperature float64 `json:"temperature"`
 	NumCtx      int     `json:"num_ctx"`
 }
 
-type chatRequest struct {
-	Model    string      `json:"model"`
-	Messages []Message   `json:"messages"`
-	Stream   bool        `json:"stream"`
-	Options  chatOptions `json:"options"`
+type ollamaChatRequest struct {
+	Model    string            `json:"model"`
+	Messages []Message         `json:"messages"`
+	Stream   bool              `json:"stream"`
+	Options  ollamaChatOptions `json:"options"`
 }
 
-type chatResponse struct {
+type ollamaChatResponse struct {
 	Message Message `json:"message"`
 	Done    bool    `json:"done"`
 }
 
-// Chat streams an assistant response from Ollama, invoking onToken for each
-// incremental chunk (typically a token or short word). The full assembled
-// response is also returned. If onToken is nil, tokens are still consumed but
-// only the final assembled string is delivered.
-func (c *Client) Chat(ctx context.Context, messages []Message, onToken func(string)) (string, error) {
-	r := chatRequest{
+// Chat streams a response from Ollama's /api/chat (NDJSON), invoking
+// onToken for each incremental chunk and returning the assembled string.
+func (c *OllamaClient) Chat(ctx context.Context, messages []Message, onToken func(string)) (string, error) {
+	body, err := json.Marshal(ollamaChatRequest{
 		Model:    c.Model,
 		Messages: messages,
 		Stream:   true,
-		Options:  chatOptions{Temperature: 0.2, NumCtx: 8192},
-	}
-	body, err := json.Marshal(r)
+		Options:  ollamaChatOptions{Temperature: 0.2, NumCtx: 8192},
+	})
 	if err != nil {
 		return "", err
 	}
@@ -87,7 +84,7 @@ func (c *Client) Chat(ctx context.Context, messages []Message, onToken func(stri
 		if len(line) == 0 {
 			continue
 		}
-		var chunk chatResponse
+		var chunk ollamaChatResponse
 		if err := json.Unmarshal(line, &chunk); err != nil {
 			return "", fmt.Errorf("ollama chat: decode: %w", err)
 		}

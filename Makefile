@@ -2,6 +2,9 @@
 DB          ?= data/index.db
 EMBED_MODEL ?= nomic-embed-text
 CHAT_MODEL  ?= qwen3:30b-a3b
+CHAT_API    ?= ollama
+CHAT_URL    ?=
+CHAT_KEY    ?=
 OLLAMA_URL  ?= http://localhost:11434
 
 .DEFAULT_GOAL := help
@@ -30,6 +33,9 @@ help:
 	@echo ""
 	@echo "Override model / db with env-style vars:"
 	@echo "  make ask CHAT_MODEL=qwen3:14b DB=other.db"
+	@echo ""
+	@echo "Talk to a remote vLLM / OpenAI-compatible server:"
+	@echo "  make ask CHAT_API=openai CHAT_URL=http://192.168.191.4:8000 CHAT_MODEL=Qwen/Qwen3-32B"
 
 setup: deps models
 	@echo ""
@@ -65,10 +71,22 @@ vet:
 
 ask:
 	@curl -fsS $(OLLAMA_URL)/api/version >/dev/null 2>&1 || { \
-		echo "Ollama not reachable at $(OLLAMA_URL). Start the app first."; \
+		echo "Ollama (embeddings) not reachable at $(OLLAMA_URL). Start the app first."; \
 		exit 1; \
 	}
-	go run ./cmd/ask -db $(DB) -embed-model $(EMBED_MODEL) -chat-model $(CHAT_MODEL)
+	@if [ "$(CHAT_API)" = "openai" ] && [ -n "$(CHAT_URL)" ]; then \
+		curl -fsS $(CHAT_URL)/v1/models >/dev/null 2>&1 || { \
+			echo "Chat backend not reachable at $(CHAT_URL). Is vLLM running?"; \
+			exit 1; \
+		}; \
+	fi
+	go run ./cmd/ask \
+		-db $(DB) \
+		-embed-model $(EMBED_MODEL) \
+		-chat-model $(CHAT_MODEL) \
+		-chat-api $(CHAT_API) \
+		$(if $(CHAT_URL),-chat-url $(CHAT_URL)) \
+		$(if $(CHAT_KEY),-chat-key $(CHAT_KEY))
 
 clean:
 	rm -f emails-rag ask index cmd/ask/ask cmd/index/index

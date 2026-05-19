@@ -22,7 +22,10 @@ func main() {
 	var (
 		dbPath     = flag.String("db", "data/index.db", "path to the sqlite index file")
 		embedModel = flag.String("embed-model", "nomic-embed-text", "ollama embedding model name")
-		chatModel  = flag.String("chat-model", "qwen3:30b-a3b", "ollama chat model name")
+		chatModel  = flag.String("chat-model", "qwen3:30b-a3b", "chat model name (Ollama tag or HF id depending on -chat-api)")
+		chatAPI    = flag.String("chat-api", "ollama", `chat backend: "ollama" or "openai" (OpenAI-compatible, also vLLM / LM Studio)`)
+		chatURL    = flag.String("chat-url", "", "chat server base URL; default localhost:11434 for ollama, localhost:8000 for openai")
+		chatKey    = flag.String("chat-key", "", "bearer token for OpenAI-compatible servers (optional)")
 		topK       = flag.Int("k", 6, "number of chunks to retrieve")
 		source     = flag.String("source", "", `default source filter: "pdf", "mbox", or "" for all`)
 	)
@@ -30,6 +33,10 @@ func main() {
 
 	if *source != "" && *source != "pdf" && *source != "mbox" {
 		fmt.Fprintln(os.Stderr, `-source must be "pdf", "mbox", or empty`)
+		os.Exit(2)
+	}
+	if *chatAPI != "ollama" && *chatAPI != "openai" {
+		fmt.Fprintln(os.Stderr, `-chat-api must be "ollama" or "openai"`)
 		os.Exit(2)
 	}
 
@@ -41,7 +48,7 @@ func main() {
 	defer s.Close()
 
 	e := embed.New(*embedModel)
-	l := llm.New(*chatModel)
+	l := llm.New(llm.Backend(*chatAPI), *chatModel, *chatURL, *chatKey)
 	searcher := pipeline.NewSearcher(e, l, s)
 	searcher.TopK = *topK
 	searcher.SourceType = *source

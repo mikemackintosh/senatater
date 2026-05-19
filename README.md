@@ -15,13 +15,14 @@ This README is meant to double as a personal runbook: every command you need to 
 5. [First run (smoke test)](#first-run-smoke-test)
 6. [Daily usage](#daily-usage)
 7. [Command reference](#command-reference)
-8. [How it works](#how-it-works)
-9. [Operational notes](#operational-notes)
-10. [Testing](#testing)
-11. [Troubleshooting](#troubleshooting)
-12. [Pushing to GitHub](#pushing-to-github)
-13. [Extending](#extending)
-14. [Project layout](#project-layout)
+8. [Remote chat backend (vLLM / DGX Spark)](#remote-chat-backend-vllm--dgx-spark)
+9. [How it works](#how-it-works)
+10. [Operational notes](#operational-notes)
+11. [Testing](#testing)
+12. [Troubleshooting](#troubleshooting)
+13. [Pushing to GitHub](#pushing-to-github)
+14. [Extending](#extending)
+15. [Project layout](#project-layout)
 
 ---
 
@@ -69,7 +70,12 @@ Any of these env-style variables can be overridden inline:
 make ask CHAT_MODEL=qwen3:14b
 make models EMBED_MODEL=bge-m3
 make ask DB=other.db OLLAMA_URL=http://localhost:11435
+
+# Talk to a remote vLLM / OpenAI-compatible server instead of local Ollama:
+make ask CHAT_API=openai CHAT_URL=http://192.168.191.4:8000 CHAT_MODEL=Qwen/Qwen3-32B
 ```
+
+See [Remote chat backend (vLLM / DGX Spark)](#remote-chat-backend-vllm--dgx-spark) for the full server-side setup.
 
 Indexing is not Make-wrapped because flag combinations vary per run — use `go run ./cmd/index ...` with whichever `-pdf-dir`/`-mbox` flags you need.
 
@@ -386,6 +392,150 @@ Interactive RAG REPL.
 | `-chat-model` | string | `qwen3:30b-a3b` | Ollama chat model that generates the answer. |
 | `-k` | int | `6` | Number of chunks retrieved per query and passed to the chat model. |
 | `-source` | string | `""` | Session default filter: `pdf`, `mbox`, or empty for all types. Inline `source:` prefix overrides this per query. |
+| `-chat-api` | string | `ollama` | Chat backend: `ollama` (default, local) or `openai` (any OpenAI-compatible server — vLLM, LM Studio, OpenAI itself). |
+| `-chat-url` | string | `""` | Chat server base URL. Empty uses each backend's default: `http://localhost:11434` for Ollama, `http://localhost:8000` for OpenAI-compatible. **Do not include `/v1`** for the OpenAI variant — the client appends it. |
+| `-chat-key` | string | `""` | Bearer token sent as `Authorization: Bearer ...`. Only honored by the OpenAI backend; vLLM by default doesn't require auth. |
+
+---
+
+## Remote chat backend (vLLM / DGX Spark)
+
+For large or fast chat models you can run vLLM (or any OpenAI-compatible server) on a separate box and point `cmd/ask` at it. Embeddings stay local on the Mac via Ollama — embedding is small and fast, no reason to add a network hop.
+
+This section walks through running **Qwen3-32B** on an **NVIDIA DGX Spark** at `192.168.191.4`, then connecting from the Mac.
+
+### On the DGX Spark
+
+The DGX Spark runs DGX OS (Ubuntu-based) with NVIDIA Container Toolkit pre-installed. SSH in, then:
+
+#### 1. Pull the vLLM Docker image
+
+```bash
+ssh user@192.168.191.4
+docker pull vllm/vllm-openai:latest
+```
+
+#### 2. (Optional) Pre-cache the model
+
+vLLM will pull the weights on first run, but pre-fetching makes the first launch fast and surfaces any HuggingFace auth issues immediately. The Qwen3 models on the [Qwen org](https://huggingface.co/Qwen) are public, so no token is needed:
+
+```bash
+mkdir -p ~/hf-cache
+docker run --rm \
+  -v ~/hf-cache:/root/.cache/huggingface \
+  --entrypoint huggingface-cli \
+  vllm/vllm-openai:latest \
+  download Qwen/Qwen3-32B
+```
+
+#### 3. Launch the server
+
+In a `tmux` session so it survives logout:
+
+```bash
+tmux new -s vllm
+docker run --rm --runtime nvidia --gpus all \
+  -v ~/hf-cache:/root/.cache/huggingface \
+  -p 8000:8000 \
+  --ipc=host \
+  --name vllm-qwen3 \
+  vllm/vllm-openai:latest \
+  --model Qwen/Qwen3-32B \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --max-model-len 16384 \
+  --gpu-memory-utilization 0.9
+```
+
+Notable flags:
+
+- `--host 0.0.0.0` is critical — without it the server only listens on the container's loopback and the Mac can't reach it.
+- `--max-model-len 16384` is generous; raise it if you intend to use longer contexts and lower it if you hit OOM.
+- `--gpu-memory-utilization 0.9` leaves a small headroom; on the DGX Spark's 128 GB unified memory this is plenty for Qwen3-32B at FP16.
+- `--ipc=host` is required by vLLM for shared-memory between workers.
+
+Detach from tmux with `Ctrl-b d`; reattach with `tmux attach -t vllm`.
+
+The first launch takes a minute or two while weights are loaded. When you see:
+
+```
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+it's ready.
+
+#### 4. Open the firewall (if active)
+
+DGX OS doesn't enable `ufw` by default, but if it's on:
+
+```bash
+sudo ufw allow 8000/tcp
+```
+
+#### 5. Verify locally on the DGX
+
+```bash
+curl -s http://localhost:8000/v1/models | jq
+# Should list "Qwen/Qwen3-32B"
+```
+
+### From the Mac
+
+Test connectivity:
+
+```bash
+curl -s http://192.168.191.4:8000/v1/models | jq
+```
+
+Then run `ask` against the remote backend:
+
+```bash
+go run ./cmd/ask \
+  -chat-api openai \
+  -chat-url http://192.168.191.4:8000 \
+  -chat-model Qwen/Qwen3-32B
+```
+
+Or via Make (forwarded variables):
+
+```bash
+make ask CHAT_API=openai CHAT_URL=http://192.168.191.4:8000 CHAT_MODEL=Qwen/Qwen3-32B
+```
+
+The embedding side is unchanged — `nomic-embed-text` keeps running on the Mac's Ollama.
+
+### Setting it as your default
+
+If you want the remote backend to be your daily driver, export the values in your shell profile (`~/.zshrc`):
+
+```bash
+export EMAILS_RAG_CHAT_API=openai
+export EMAILS_RAG_CHAT_URL=http://192.168.191.4:8000
+export EMAILS_RAG_CHAT_MODEL=Qwen/Qwen3-32B
+
+# Then either alias or pass them to make:
+alias ask='go run ~/stenator/emails-rag/cmd/ask \
+  -chat-api $EMAILS_RAG_CHAT_API \
+  -chat-url $EMAILS_RAG_CHAT_URL \
+  -chat-model $EMAILS_RAG_CHAT_MODEL'
+```
+
+### Troubleshooting the remote setup
+
+**`connection refused` from the Mac.**
+The vLLM container is listening on `127.0.0.1` instead of `0.0.0.0`. Verify the launch command includes `--host 0.0.0.0`, and that the Docker `-p 8000:8000` port mapping is present. Then `nc -zv 192.168.191.4 8000` from the Mac to confirm the port is reachable on the LAN.
+
+**`openai chat: status 404`.**
+The base URL probably has `/v1` already on it. Don't include it — the client appends `/v1/chat/completions` itself. Pass `http://192.168.191.4:8000`, not `http://192.168.191.4:8000/v1`.
+
+**`openai chat: status 400` with `model not found`.**
+The `-chat-model` value must match exactly what vLLM serves at `/v1/models`. Run `curl http://192.168.191.4:8000/v1/models` to see the canonical name.
+
+**Streaming feels choppy on the LAN.**
+That's usually network MTU or the chat model itself being slow at first token. Run `curl http://192.168.191.4:8000/v1/models` to confirm latency is sub-ms; if so, the choppiness is generation-side.
+
+**OOM on the DGX during model load.**
+Drop `--gpu-memory-utilization` to `0.85`, or lower `--max-model-len`. If still tight, fall back to an AWQ-quantized variant (`Qwen/Qwen2.5-32B-Instruct-AWQ` is reliable).
 
 ---
 
@@ -657,7 +807,11 @@ Likely next moves, in rough order of value-per-effort:
     │   ├── chunk.go           paragraph-aware overlapping splitter
     │   └── chunk_test.go
     ├── embed/ollama.go        ollama embeddings client
-    ├── llm/ollama.go          ollama streaming chat client
+    ├── llm/
+    │   ├── llm.go             Client interface + backend factory
+    │   ├── ollama.go          Ollama NDJSON streaming chat client
+    │   ├── openai.go          OpenAI-compatible (vLLM, LM Studio) SSE chat client
+    │   └── openai_test.go
     ├── store/
     │   ├── sqlite.go          schema + float32 BLOB vector store
     │   └── sqlite_test.go

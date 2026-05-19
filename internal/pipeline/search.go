@@ -17,14 +17,14 @@ Cite sources inline by their numeric reference, like [1] or [3].`
 // Searcher orchestrates retrieval and generation for a single query.
 type Searcher struct {
 	Embedder   *embed.Client
-	LLM        *llm.Client
+	LLM        llm.Client
 	Store      *store.Store
 	TopK       int
 	SourceType string // default filter; "" means all types
 }
 
 // NewSearcher returns a Searcher with default top-k retrieval.
-func NewSearcher(e *embed.Client, l *llm.Client, s *store.Store) *Searcher {
+func NewSearcher(e *embed.Client, l llm.Client, s *store.Store) *Searcher {
 	return &Searcher{Embedder: e, LLM: l, Store: s, TopK: 6}
 }
 
