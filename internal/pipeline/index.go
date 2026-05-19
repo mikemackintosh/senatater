@@ -52,7 +52,8 @@ func (i *Indexer) IndexPDF(ctx context.Context, path string) error {
 	chunks := chunk.Split(text, i.Chunker)
 	i.Log.Info("indexing pdf", "path", path, "chunks", len(chunks))
 
-	return i.embedAndStore(ctx, path, "pdf", "", chunks, nil)
+	prog := newProgress(i.Log, "embedding pdf")
+	return i.embedAndStore(ctx, path, "pdf", "", chunks, nil, prog)
 }
 
 // IndexMBOX walks an MBOX file, indexing each new message. Dedup is per
@@ -60,6 +61,7 @@ func (i *Indexer) IndexPDF(ctx context.Context, path string) error {
 // only ingests the new messages on the next run.
 func (i *Indexer) IndexMBOX(ctx context.Context, path string) error {
 	var indexed, skipped, chunkCount int
+	prog := newProgress(i.Log, "indexing mbox")
 	err := extract.MBOX(path, func(m extract.Message) error {
 		id := MessageDedupID(m)
 		has, err := i.Store.HasMessageID(ctx, id)
@@ -68,6 +70,7 @@ func (i *Indexer) IndexMBOX(ctx context.Context, path string) error {
 		}
 		if has {
 			skipped++
+			prog.tick("path", path, "messages_indexed", indexed, "messages_skipped", skipped, "chunks", chunkCount)
 			return nil
 		}
 
@@ -83,13 +86,17 @@ func (i *Indexer) IndexMBOX(ctx context.Context, path string) error {
 			"subject": m.Subject,
 			"date":    m.Date,
 		}
-		if err := i.embedAndStore(ctx, path, "mbox", id, chunks, meta); err != nil {
+		// Per-batch progress is suppressed here — each mbox message is one
+		// embed call (1-3 chunks), so the message-level tick below is the
+		// right granularity.
+		if err := i.embedAndStore(ctx, path, "mbox", id, chunks, meta, nil); err != nil {
 			return err
 		}
 		// Counters only advance once the chunks are actually persisted, so
 		// the summary log line never overstates progress on partial failures.
 		chunkCount += len(chunks)
 		indexed++
+		prog.tick("path", path, "messages_indexed", indexed, "messages_skipped", skipped, "chunks", chunkCount)
 		return nil
 	})
 	i.Log.Info("indexed mbox",
@@ -118,11 +125,13 @@ func MessageDedupID(m extract.Message) string {
 }
 
 // embedAndStore embeds chunks in batches and writes them to the store.
-func (i *Indexer) embedAndStore(ctx context.Context, source, srcType, messageID string, chunks []string, meta map[string]string) error {
-	for start := 0; start < len(chunks); start += i.Batch {
+// If prog is non-nil, a throttled progress line is emitted after each batch.
+func (i *Indexer) embedAndStore(ctx context.Context, source, srcType, messageID string, chunks []string, meta map[string]string, prog *progress) error {
+	total := len(chunks)
+	for start := 0; start < total; start += i.Batch {
 		end := start + i.Batch
-		if end > len(chunks) {
-			end = len(chunks)
+		if end > total {
+			end = total
 		}
 		batch := chunks[start:end]
 		vecs, err := i.Embedder.Embed(ctx, batch)
@@ -143,6 +152,9 @@ func (i *Indexer) embedAndStore(ctx context.Context, source, srcType, messageID 
 		}
 		if err := i.Store.InsertBatch(ctx, records); err != nil {
 			return fmt.Errorf("store: %w", err)
+		}
+		if prog != nil {
+			prog.tick("source", source, "chunks_done", end, "chunks_total", total)
 		}
 	}
 	return nil
